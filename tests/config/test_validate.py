@@ -6,14 +6,14 @@ from onecard.errors import ConfigError
 
 
 def cfg(**kw) -> Config:
-    base = dict(
-        vram_budget_mb=6800,
-        models={
+    base = {
+        "vram_budget_mb": 6800,
+        "models": {
             "fast": ModelSpec(ref="qwen2.5:1.5b", residency="pinned", footprint_mb=900),
             "big": ModelSpec(ref="llama3.1:8b", footprint_mb=5000),
         },
-        tasks={"chat": TaskSpec(model="big")},
-    )
+        "tasks": {"chat": TaskSpec(model="big")},
+    }
     base.update(kw)
     return Config(**base)
 
