@@ -1,9 +1,11 @@
 import asyncio
+import contextvars
 
 import pytest
 
 from onecard.errors import EvictionError
 from onecard.gpu.arbiter import Arbiter
+from onecard.gpu.consumer import Residency
 from onecard.gpu.fake import FakeConsumer
 
 
@@ -52,17 +54,62 @@ async def test_restore_pinned_is_idempotent():
     assert ollama.load_count["small"] == 1
 
 
+# Task-local label for the claim currently in flight. Each asyncio Task gets
+# its own copy of the contextvars context at creation time, so setting this
+# inside one gathered coroutine cannot leak into the other's — unlike a
+# label stored as a mutable attribute on the shared consumer, which a
+# concurrently-running task could overwrite mid-flight.
+_current_label: contextvars.ContextVar[str] = contextvars.ContextVar("current_label")
+
+
+class _RecordingConsumer(FakeConsumer):
+    """FakeConsumer that appends labelled events to a shared log.
+
+    Used to prove exclusive claims serialize behind the arbiter's lock: with
+    a real suspension point (delay_s > 0) on load/release_all, two
+    concurrently gathered exclusive claims would interleave their operations
+    if the lock were not held across the whole claim.
+    """
+
+    def __init__(self, *args: object, log: list[str], **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._log = log
+
+    async def load(
+        self, key: str, *, pinned: bool, footprint_hint_mb: int | None
+    ) -> Residency:
+        self._log.append(f"{_current_label.get()}:load")
+        return await super().load(key, pinned=pinned, footprint_hint_mb=footprint_hint_mb)
+
+    async def release_all(self) -> None:
+        self._log.append(f"{_current_label.get()}:release_all")
+        await super().release_all()
+
+
 async def test_concurrent_exclusive_claims_serialize():
-    a, _ollama, _comfy = two_consumer_arb()
+    log: list[str] = []
+    comfy = _RecordingConsumer(
+        "comfyui", {"sd15": 4000, "sd15b": 4000}, delay_s=0.01, log=log
+    )
+    a = Arbiter(budget_mb=8000, consumers={"comfyui": comfy})
     order: list[str] = []
 
-    async def claim(key: str) -> None:
+    async def claim(key: str, label: str) -> None:
+        _current_label.set(label)
         await a.claim("comfyui", key, need_mb=4000, exclusive=True)
         order.append(f"done:{key}")
 
-    await asyncio.gather(claim("sd15"), claim("sd15b"))
+    await asyncio.gather(claim("sd15", "A"), claim("sd15b", "B"))
     assert len(order) == 2, "both claims must complete, one after the other"
     assert len([r for r in await a.residents()]) == 1, "only one may hold the card"
+
+    # The lock must serialize entire claims: one claim's release_all+load
+    # must fully finish before the other's begins. Interleaving such as
+    # [A:release_all, B:release_all, A:load, B:load] must fail here.
+    assert log in (
+        ["A:release_all", "A:load", "B:release_all", "B:load"],
+        ["B:release_all", "B:load", "A:release_all", "A:load"],
+    ), f"exclusive claims interleaved: {log}"
 
 
 async def test_swap_events_record_exclusive_reason():
