@@ -130,3 +130,18 @@ class Arbiter:
                 )
             )
         self._held.clear()
+
+    async def restore_pinned(self, specs: list[tuple[str, str, int]]) -> None:
+        """Reload pinned models after an exclusive claim released them.
+
+        Failures here are raised, not swallowed: a harness that silently came
+        back without its pinned fast model would make every later request
+        mysteriously slower with no explanation.
+        """
+        async with self._lock:
+            for consumer, key, need_mb in specs:
+                if (consumer, key) in self._held:
+                    continue
+                await self._claim_locked(
+                    consumer, key, need_mb, pinned=True, exclusive=False
+                )
