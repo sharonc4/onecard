@@ -1,6 +1,6 @@
 import pytest
 
-from onecard.errors import BudgetError
+from onecard.errors import BudgetError, EvictionError
 from onecard.gpu.arbiter import Arbiter
 from onecard.gpu.fake import FakeConsumer
 
@@ -68,3 +68,29 @@ async def test_unknown_consumer_raises():
     a, _ = arb()
     with pytest.raises(KeyError):
         await a.claim("nope", "a", need_mb=1)
+
+
+async def test_eviction_that_does_not_actually_free_memory_raises_and_loads_nothing():
+    c = FakeConsumer("ollama", {"a": 400, "b": 400, "d": 400}, honest=False)
+    a = Arbiter(budget_mb=1000, consumers={"ollama": c})
+    await a.claim("ollama", "a", need_mb=400)
+    await a.claim("ollama", "b", need_mb=400)
+    await a.claim("ollama", "a", need_mb=400)  # touch 'a' so 'b' is now LRU
+
+    with pytest.raises(EvictionError, match="still reports 'b' as resident"):
+        await a.claim("ollama", "d", need_mb=400)
+
+    assert "d" not in {r.key for r in await a.residents()}
+    assert c.load_count["d"] == 0
+
+
+async def test_ordinary_eviction_of_an_honest_consumer_succeeds_and_records_swap():
+    a, _c = arb(budget=1000, a=400, b=400, d=400)
+    await a.claim("ollama", "a", need_mb=400)
+    await a.claim("ollama", "b", need_mb=400)
+    await a.claim("ollama", "a", need_mb=400)  # touch 'a' so 'b' is now LRU
+
+    await a.claim("ollama", "d", need_mb=400)
+
+    assert {r.key for r in await a.residents()} == {"a", "d"}
+    assert a.swaps[-1].evicted == "b"
