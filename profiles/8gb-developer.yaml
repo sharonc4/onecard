@@ -1,0 +1,22 @@
+# Profile: 8gb-developer
+# Reviewed: 2026-09-08
+# Evidence: sizes taken from published Q4_K_M quantizations. NOT yet measured on
+#           real 8GB hardware — see the design doc's open items. If you run this
+#           on a real card, please open a PR correcting these numbers.
+vram_budget_mb: 6800
+disk_budget_gb: 60
+
+models:
+  fast:  { ref: "qwen2.5:1.5b-instruct-q4_K_M", residency: pinned, footprint_mb: 1100 }
+  coder: { ref: "qwen2.5-coder:7b-instruct-q4_K_M", footprint_mb: 4700 }
+
+tasks:
+  code:
+    model: coder
+    params: { num_ctx: 8192, temperature: 0.2 }
+  explain:
+    model: coder
+    params: { num_ctx: 8192 }
+  summarize:
+    model: fast
+    params: { num_ctx: 4096 }

@@ -1,0 +1,14 @@
+vram_budget_mb: 6800
+disk_budget_gb: 60
+
+models:
+  fast:     { ref: "qwen2.5:1.5b-instruct-q4_K_M", residency: pinned, footprint_mb: 1100 }
+  reasoner: { ref: "llama3.1:8b-instruct-q4_K_M", footprint_mb: 5000 }
+
+tasks:
+  chat:
+    model: reasoner
+    params: { num_ctx: 4096 }
+  summarize:
+    model: fast
+    params: { num_ctx: 8192, temperature: 0.2 }

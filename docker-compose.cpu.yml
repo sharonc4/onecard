@@ -1,0 +1,8 @@
+# Overlay for contributors with no NVIDIA card:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices: []

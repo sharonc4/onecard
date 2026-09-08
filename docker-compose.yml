@@ -1,0 +1,22 @@
+services:
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  onecard:
+    build: .
+    depends_on: [ollama]
+    volumes:
+      - ./onecard.yaml:/config/onecard.yaml:ro
+      - ./data:/data
+    command: ["--help"]
+
+volumes:
+  ollama-models:
