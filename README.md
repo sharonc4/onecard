@@ -10,12 +10,19 @@ onecard lets you declare a specialist per task and swaps them for you:
 
 ```yaml
 tasks:
-  code:      { model: coder }
+  chat:      { model: reasoner }
   summarize: { model: fast }
 ```
 
 ```bash
-onecard run code "why is this function slow?"
+onecard run summarize "some long text"
+```
+
+The shipped `profiles/8gb-developer.yaml` adds a `coder` model and a `code`
+task for exactly this kind of prompt:
+
+```bash
+onecard run code "why is this function slow?" --config profiles/8gb-developer.yaml
 ```
 
 It is a **GPU arbiter**, not just a model router: one component owns the card
@@ -25,8 +32,8 @@ and decides who holds it, so nothing ever quietly spills to system RAM.
 
 ```bash
 docker compose up -d
-docker compose run --rm onecard validate --config /config/onecard.yaml
-docker compose run --rm onecard run summarize "some long text" --ollama http://ollama:11434
+docker compose run --rm onecard validate
+docker compose run --rm onecard run summarize "some long text"
 ```
 
 No NVIDIA card? Everything still runs, slowly, on CPU:

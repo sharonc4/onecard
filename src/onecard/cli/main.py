@@ -15,9 +15,15 @@ from onecard.store.footprints import FootprintStore
 
 app = typer.Typer(help="A local AI assistant for one small GPU.", no_args_is_help=True)
 
-ConfigOpt: Path = typer.Option(Path("onecard.yaml"), "--config", "-c", help="Path to onecard.yaml")
-OllamaOpt: str = typer.Option("http://localhost:11434", "--ollama", help="Ollama base URL")
-DataOpt: Path = typer.Option(Path("data"), "--data", help="Directory for the SQLite stores")
+ConfigOpt: Path = typer.Option(
+    Path("onecard.yaml"), "--config", "-c", envvar="ONECARD_CONFIG", help="Path to onecard.yaml"
+)
+OllamaOpt: str = typer.Option(
+    "http://localhost:11434", "--ollama", envvar="ONECARD_OLLAMA", help="Ollama base URL"
+)
+DataOpt: Path = typer.Option(
+    Path("data"), "--data", envvar="ONECARD_DATA", help="Directory for the SQLite stores"
+)
 ExplainOpt: bool = typer.Option(False, "--explain", help="Show routing decisions")
 TaskArg: str = typer.Argument(..., help="Task name from the config")
 TextArg: str = typer.Argument(..., help="Input for the task")

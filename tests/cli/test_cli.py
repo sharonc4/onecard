@@ -86,6 +86,13 @@ def test_validate_warns_about_workflow_tasks_but_still_says_ok(tmp_path: Path):
     assert "ok" in result.stdout.lower()
 
 
+def test_validate_honours_onecard_config_env_var(tmp_path: Path):
+    config_path = write(tmp_path, GOOD)
+    result = runner.invoke(app, ["validate"], env={"ONECARD_CONFIG": str(config_path)})
+    assert result.exit_code == 0
+    assert "ok" in result.stdout.lower()
+
+
 def test_ps_with_a_malformed_ollama_url_fails_clearly(tmp_path: Path):
     result = runner.invoke(
         app,

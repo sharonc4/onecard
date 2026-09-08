@@ -13,6 +13,10 @@ services:
   onecard:
     build: .
     depends_on: [ollama]
+    environment:
+      ONECARD_CONFIG: /config/onecard.yaml
+      ONECARD_DATA: /data
+      ONECARD_OLLAMA: http://ollama:11434
     volumes:
       - ./onecard.yaml:/config/onecard.yaml:ro
       - ./data:/data
