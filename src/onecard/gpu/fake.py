@@ -32,6 +32,9 @@ class FakeConsumer:
         self.load_count: dict[str, int] = defaultdict(int)
         self.release_all_count = 0
 
+    def key_for(self, ref: str) -> str:
+        return ref
+
     async def residents(self) -> list[Residency]:
         return list(self._resident.values())
 

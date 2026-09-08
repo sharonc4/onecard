@@ -4,7 +4,8 @@ import httpx
 import pytest
 
 from onecard.backend.ollama import OllamaConsumer
-from onecard.errors import BackendError
+from onecard.errors import BackendError, EvictionError
+from onecard.gpu.arbiter import Arbiter
 
 PS_TWO = {
     "models": [
@@ -129,3 +130,51 @@ async def test_chat_raises_backend_error_on_malformed_stream_line():
 
     with pytest.raises(BackendError, match="not valid JSON|non-JSON"):
         _ = [c async for c in consumer(handler).chat("m", "hi", {})]
+
+
+PS_UNTAGGED = {"models": [{"name": "nomic-embed-text:latest", "size_vram": 300_000_000}]}
+
+
+async def test_load_of_an_untagged_ref_matches_the_tagged_name_ollama_reports():
+    """/api/ps qualifies names; a config ref usually does not. They must agree."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/generate":
+            return httpx.Response(200, json={"done": True})
+        return httpx.Response(200, json=PS_UNTAGGED)
+
+    r = await consumer(handler).load("nomic-embed-text", pinned=False, footprint_hint_mb=None)
+    assert r.key == "nomic-embed-text:latest"
+    assert r.footprint_mb == 286
+
+
+async def test_residents_reports_qualified_keys():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=PS_UNTAGGED)
+
+    keys = [r.key for r in await consumer(handler).residents()]
+    assert keys == ["nomic-embed-text:latest"]
+    assert consumer(handler).key_for("nomic-embed-text") == "nomic-embed-text:latest"
+    assert consumer(handler).key_for("llama3.1:8b") == "llama3.1:8b"
+
+
+async def test_a_release_that_did_not_free_the_card_is_detected_for_an_untagged_ref():
+    """The eviction guard must fire, not report a phantom success.
+
+    A bare ref compared against a tagged /api/ps name finds no match, so an
+    untagged model that is still resident would be reported as evicted --
+    bypassing the single most important invariant in the design.
+    """
+    a = Arbiter(
+        budget_mb=500,
+        consumers={"ollama": consumer(_never_frees)},
+    )
+    with pytest.raises(EvictionError, match="still reports 'nomic-embed-text:latest'"):
+        await a.claim("ollama", "other-model", need_mb=300)
+
+
+def _never_frees(request: httpx.Request) -> httpx.Response:
+    """Accepts every release and keeps reporting the model as resident."""
+    if request.url.path == "/api/ps":
+        return httpx.Response(200, json=PS_UNTAGGED)
+    return httpx.Response(200, json={"done": True})

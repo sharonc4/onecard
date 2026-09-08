@@ -32,6 +32,10 @@ class Arbiter:
         self.swaps: list[SwapEvent] = []
         self._held: dict[tuple[str, str], _Held] = {}
         self._lock = asyncio.Lock()
+        # Adopted models get strictly decreasing (and always negative) last_used
+        # stamps, so they sort older than anything time.monotonic() can produce
+        # and older than each other in discovery order.
+        self._adopt_clock = 0.0
 
     async def residents(self) -> list[Residency]:
         return [h.residency for h in self._held.values()]
@@ -63,13 +67,26 @@ class Arbiter:
                 f"'{key}' needs {need_mb}MB which exceeds the budget of {self.budget_mb}MB"
             )
 
-        ident = (consumer, key)
-        if not exclusive and ident in self._held:
-            self._held[ident].last_used = time.monotonic()
-            return self._held[ident].residency
+        ident = (consumer, self.consumers[consumer].key_for(key))
+        reusable = self._reusable(ident, pinned=pinned)
+        if not exclusive and reusable is not None:
+            reusable.last_used = time.monotonic()
+            return reusable.residency
 
         if exclusive:
             await self._release_everything(reason=f"exclusive claim by '{key}'")
+        else:
+            # Nothing releases the card at process exit: Ollama holds a model
+            # for its keep_alive after we are gone. A fresh Arbiter that
+            # trusted its own empty bookkeeping would load on top of that and
+            # spill to system RAM, which is the one failure this project
+            # exists to prevent. So find out what the card really holds before
+            # doing any budget arithmetic.
+            await self._reconcile_locked()
+            reusable = self._reusable(ident, pinned=pinned)
+            if reusable is not None:
+                reusable.last_used = time.monotonic()
+                return reusable.residency
 
         while await self.used_mb() + need_mb > self.budget_mb:
             victim = self._lru_victim()
@@ -86,6 +103,45 @@ class Arbiter:
         self._held[ident] = _Held(residency=residency)
         return residency
 
+    def _reusable(self, ident: tuple[str, str], *, pinned: bool) -> _Held | None:
+        """The held entry that already satisfies this claim, if there is one.
+
+        A claim for a pinned model is not satisfied by an unpinned entry: it
+        has to be loaded again with a pinning keep_alive, or it would stay
+        evictable while validation reserves its footprint forever.
+        """
+        held = self._held.get(ident)
+        if held is None:
+            return None
+        if pinned and not held.residency.pinned:
+            return None
+        return held
+
+    async def _reconcile_locked(self) -> None:
+        """Adopt models the card holds that this process did not load.
+
+        Adopted entries are unpinned, so they are evictable, and carry the
+        footprint the consumer reports -- including models the config never
+        declared, because the budget is about the card, not about our config.
+        A BackendError from a consumer propagates: proceeding as though the
+        card were empty is exactly the bug this guards against.
+        """
+        for name, consumer in self.consumers.items():
+            known = {h.residency.key for h in self._held.values() if h.residency.consumer == name}
+            for r in await consumer.residents():
+                if r.key in known:
+                    continue
+                self._adopt_clock -= 1.0
+                self._held[(name, r.key)] = _Held(
+                    residency=Residency(
+                        consumer=name,
+                        key=r.key,
+                        footprint_mb=r.footprint_mb,
+                        pinned=False,
+                    ),
+                    last_used=self._adopt_clock,
+                )
+
     def _lru_victim(self) -> tuple[str, str] | None:
         candidates = [k for k, h in self._held.items() if not h.residency.pinned]
         if not candidates:
@@ -95,6 +151,9 @@ class Arbiter:
     async def _evict(self, ident: tuple[str, str], *, reason: str) -> None:
         consumer, key = ident
         started = time.monotonic()
+        # `key` is already in the consumer's key space (see _claim_locked), so
+        # the confirmation compares like with like. Comparing a config ref
+        # against a tagged name would report an eviction that never happened.
         await self.consumers[consumer].release(key)
         await self._confirm_gone(consumer, key)
         self._held.pop(ident, None)
@@ -140,8 +199,6 @@ class Arbiter:
         """
         async with self._lock:
             for consumer, key, need_mb in specs:
-                if (consumer, key) in self._held:
-                    continue
                 await self._claim_locked(
                     consumer, key, need_mb, pinned=True, exclusive=False
                 )

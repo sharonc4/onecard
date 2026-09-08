@@ -18,6 +18,15 @@ class GpuConsumer(Protocol):
 
     name: str
 
+    def key_for(self, ref: str) -> str:
+        """This consumer's own key for a config ref.
+
+        The arbiter keys its bookkeeping by this so that its key space and the
+        backend's are the same one: Ollama reports "nomic-embed-text:latest"
+        for a ref written "nomic-embed-text", and an arbiter comparing the two
+        forms would confirm evictions that never happened.
+        """
+
     async def residents(self) -> list[Residency]:
         """Ground truth: what this consumer currently holds."""
 

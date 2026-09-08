@@ -8,6 +8,20 @@ from onecard.errors import BackendError
 from onecard.gpu.consumer import DEFAULT_FOOTPRINT_MB, Residency
 
 BYTES_PER_MIB = 1024 * 1024
+DEFAULT_TAG = "latest"
+
+
+def canonical_ref(ref: str) -> str:
+    """Ollama's own name for a model ref, so our key space and its key space agree.
+
+    /api/ps always reports fully qualified names ("nomic-embed-text:latest")
+    while a config ref is often written bare ("nomic-embed-text"). The chosen
+    canonical form is the FULLY QUALIFIED one: a ref with no tag gets ":latest"
+    appended. Every key this consumer accepts or reports is canonicalized, so
+    the arbiter's confirmed-eviction check compares like with like instead of
+    silently finding no match and declaring a still-resident model gone.
+    """
+    return ref if ":" in ref else f"{ref}:{DEFAULT_TAG}"
 
 
 class OllamaConsumer:
@@ -33,6 +47,9 @@ class OllamaConsumer:
             raise BackendError(f"ollama returned {resp.status_code}: {resp.text[:200]}")
         return resp
 
+    def key_for(self, ref: str) -> str:
+        return canonical_ref(ref)
+
     async def residents(self) -> list[Residency]:
         try:
             resp = await self._client.get("/api/ps", timeout=30.0)
@@ -50,27 +67,28 @@ class OllamaConsumer:
         return [
             Residency(
                 consumer=self.name,
-                key=entry["name"],
+                key=canonical_ref(entry["name"]),
                 footprint_mb=int(entry.get("size_vram", 0)) // BYTES_PER_MIB,
             )
             for entry in data.get("models", [])
         ]
 
     async def load(self, key: str, *, pinned: bool, footprint_hint_mb: int | None) -> Residency:
-        await self._post("/api/generate", {"model": key, "keep_alive": -1 if pinned else "10m"})
+        ref = canonical_ref(key)
+        await self._post("/api/generate", {"model": ref, "keep_alive": -1 if pinned else "10m"})
         for r in await self.residents():
-            if r.key == key:
+            if r.key == ref:
                 # A measured footprint always beats an estimate we were handed.
                 return Residency(
                     consumer=self.name,
-                    key=key,
+                    key=ref,
                     footprint_mb=r.footprint_mb or (footprint_hint_mb or DEFAULT_FOOTPRINT_MB),
                     pinned=pinned,
                 )
-        raise BackendError(f"ollama accepted a load of '{key}' but does not report it as resident")
+        raise BackendError(f"ollama accepted a load of '{ref}' but does not report it as resident")
 
     async def release(self, key: str) -> None:
-        await self._post("/api/generate", {"model": key, "keep_alive": 0})
+        await self._post("/api/generate", {"model": canonical_ref(key), "keep_alive": 0})
 
     async def release_all(self) -> None:
         for r in await self.residents():
