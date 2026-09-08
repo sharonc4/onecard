@@ -318,11 +318,9 @@ Nothing degrades quietly. Three explicit commitments:
 
 ## Open items
 
-- **Publication is blocked on GitHub credentials.** As of 2026-09-08 this
-  machine has no `gh` CLI, no stored git credential for github.com, no
-  `GITHUB_TOKEN`, and the GitHub MCP connector returns
-  `400: Authorization header is badly formatted`. The repo exists locally with
-  real commits; pushing requires authenticating first.
+- **No 8GB hardware has run this yet.** The design is reasoned from published
+  model sizes and Ollama's documented behavior, not from measurement. Every
+  VRAM figure here is an estimate until someone runs it on a real card.
 - **Profile model selections are unvalidated.** Initial profiles are seeded from
   general reputation, not measurement. Before v1.0 each profile's claims should
   be checked on real 8GB hardware, and the dated headers filled in honestly.
