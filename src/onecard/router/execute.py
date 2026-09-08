@@ -44,9 +44,14 @@ class Executor:
         for step in plan.steps:
             if loaded != step.model_name:
                 seen_before = len(self.arbiter.swaps)
-                self.on_event(f"loading {step.model_name} ({step.need_mb}MB)")
+                # A footprint measured on a previous load beats the declared
+                # estimate; that is the whole point of recording them. The KV
+                # estimate still comes from this task's num_ctx.
+                measured = self.store.get("ollama", step.model_ref)
+                need_mb = (measured or step.footprint_mb) + step.kv_mb
+                self.on_event(f"loading {step.model_name} ({need_mb}MB)")
                 residency = await self.arbiter.claim(
-                    "ollama", step.model_ref, need_mb=step.need_mb
+                    "ollama", step.model_ref, need_mb=need_mb, pinned=step.pinned
                 )
                 for swap in self.arbiter.swaps[seen_before:]:
                     self.on_event(f"evicting {swap.evicted} ({swap.duration_s:.1f}s)")

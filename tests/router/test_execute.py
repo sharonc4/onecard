@@ -11,8 +11,16 @@ from onecard.router.plan import ExecPlan, ExecStep
 from onecard.store.footprints import FootprintStore
 
 
-def step(model="coder", ref="qwen-coder", prompt=None, need=4000) -> ExecStep:
-    return ExecStep(model_name=model, model_ref=ref, prompt=prompt, params={}, need_mb=need)
+def step(model="coder", ref="qwen-coder", prompt=None, need=4000, kv=0, pinned=False) -> ExecStep:
+    return ExecStep(
+        model_name=model,
+        model_ref=ref,
+        prompt=prompt,
+        params={},
+        footprint_mb=need,
+        kv_mb=kv,
+        pinned=pinned,
+    )
 
 
 def make(tmp_path: Path, budget=8000):

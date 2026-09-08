@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from onecard.config.schema import Config, ModelSpec, StepSpec, TaskSpec
@@ -109,3 +111,43 @@ def test_step_pipeline_that_fits_passes():
         },
     )
     assert validate_config(ok) == []
+
+
+def test_undeclared_footprint_still_has_to_fit_the_budget():
+    """validate and runtime must use the same fallback, or validate says 'ok' to
+    a config that raises BudgetError mid-request."""
+    bad = cfg(
+        vram_budget_mb=6000,
+        models={"big": ModelSpec(ref="llama3.1:8b")},
+        tasks={"chat": TaskSpec(model="big", params={"num_ctx": 32768})},
+    )
+    with pytest.raises(ConfigError, match="can never fit"):
+        validate_config(bad)
+
+
+def test_missing_prompt_file_is_fatal_and_names_the_resolved_path(tmp_path: Path):
+    bad = cfg(tasks={"chat": TaskSpec(model="big", prompt="prompts/gone.md")})
+    with pytest.raises(ConfigError, match="prompts.gone.md"):
+        validate_config(bad, tmp_path)
+
+
+def test_existing_prompt_file_passes(tmp_path: Path):
+    (tmp_path / "p.md").write_text("hi", encoding="utf-8")
+    ok = cfg(tasks={"chat": TaskSpec(model="big", prompt="p.md")})
+    assert validate_config(ok, tmp_path) == []
+
+
+def test_prompt_check_is_skipped_when_there_is_no_base_dir():
+    ok = cfg(tasks={"chat": TaskSpec(model="big", prompt="prompts/whatever.md")})
+    assert validate_config(ok) == []
+
+
+def test_step_fit_failure_message_is_not_garbled():
+    bad = cfg(
+        vram_budget_mb=2000,
+        models={"big": ModelSpec(ref="big", footprint_mb=5000)},
+        tasks={"pipeline": TaskSpec(steps=[StepSpec(model="big")])},
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert "task 'pipeline' step model 'big' can never fit" in str(exc.value)
