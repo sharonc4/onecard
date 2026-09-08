@@ -17,6 +17,14 @@ GOOD = textwrap.dedent(
     """
 )
 
+WORKFLOW = textwrap.dedent(
+    """
+    vram_budget_mb: 6800
+    tasks:
+      picture: { workflow: "workflows/sd15.json", exclusive: true }
+    """
+)
+
 TOO_BIG = textwrap.dedent(
     """
     vram_budget_mb: 1000
@@ -58,3 +66,35 @@ def test_run_with_unknown_task_fails_clearly(tmp_path: Path):
     )
     assert result.exit_code == 1
     assert "unknown task 'ghost'" in result.stdout
+
+
+def test_run_on_a_workflow_task_fails_clearly_instead_of_a_traceback(tmp_path: Path):
+    result = runner.invoke(
+        app, ["run", "picture", "a cat", "--config", str(write(tmp_path, WORKFLOW))]
+    )
+    assert result.exit_code == 1
+    assert "image tasks" in result.stdout
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_validate_warns_about_workflow_tasks_but_still_says_ok(tmp_path: Path):
+    result = runner.invoke(app, ["validate", "--config", str(write(tmp_path, WORKFLOW))])
+    assert result.exit_code == 0
+    assert "warning" in result.stdout.lower()
+    assert "workflow" in result.stdout.lower()
+    assert "cannot run" in result.stdout.lower()
+    assert "ok" in result.stdout.lower()
+
+
+def test_ps_with_a_malformed_ollama_url_fails_clearly(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        [
+            "ps",
+            "--config", str(write(tmp_path, GOOD)),
+            "--ollama", "http://[::1",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "http://[::1" in result.stdout
+    assert result.exception is None or isinstance(result.exception, SystemExit)

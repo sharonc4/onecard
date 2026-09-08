@@ -7,7 +7,7 @@ import typer
 from onecard.backend.ollama import OllamaConsumer
 from onecard.config.loader import load_config
 from onecard.config.validate import validate_config
-from onecard.errors import OneCardError
+from onecard.errors import BackendError, OneCardError
 from onecard.gpu.arbiter import Arbiter
 from onecard.router.execute import Executor
 from onecard.router.plan import build_plan
@@ -28,6 +28,20 @@ def _fail(exc: Exception) -> None:
     raise typer.Exit(code=1)
 
 
+def _make_client(ollama: str) -> httpx.AsyncClient:
+    """Build the Ollama HTTP client, turning a malformed --ollama URL into a BackendError.
+
+    httpx validates the base URL inside AsyncClient's constructor and raises
+    httpx.InvalidURL there -- before OllamaConsumer ever sees it -- and that
+    exception subclasses plain Exception rather than httpx.HTTPError, so it
+    would otherwise slip past the existing OneCardError handling as a traceback.
+    """
+    try:
+        return httpx.AsyncClient(base_url=ollama)
+    except httpx.InvalidURL as exc:
+        raise BackendError(f"invalid --ollama URL '{ollama}': {exc}") from exc
+
+
 @app.command()
 def validate(config: Path = ConfigOpt) -> None:
     """Check the config before anything tries to use it."""
@@ -37,6 +51,13 @@ def validate(config: Path = ConfigOpt) -> None:
     except OneCardError as exc:
         _fail(exc)
         return
+    workflow_tasks = sorted(name for name, task in cfg.tasks.items() if task.workflow is not None)
+    if workflow_tasks:
+        warnings.append(
+            f"task(s) {', '.join(workflow_tasks)} declare 'workflow' and cannot run in this "
+            "build (no ComfyUI consumer)"
+        )
+
     for w in warnings:
         typer.echo(f"warning: {w}")
     typer.echo(
@@ -51,7 +72,7 @@ def ps(config: Path = ConfigOpt, ollama: str = OllamaOpt) -> None:
 
     async def _run() -> None:
         cfg = load_config(config)
-        async with httpx.AsyncClient(base_url=ollama) as client:
+        async with _make_client(ollama) as client:
             residents = await OllamaConsumer(base_url=ollama, client=client).residents()
         used = sum(r.footprint_mb for r in residents)
         for r in residents:
@@ -81,7 +102,7 @@ def run(
         plan = build_plan(cfg, task)
         if explain:
             typer.echo(f"task={plan.task} models={plan.load_sequence}", err=True)
-        async with httpx.AsyncClient(base_url=ollama) as client:
+        async with _make_client(ollama) as client:
             consumer = OllamaConsumer(base_url=ollama, client=client)
             arbiter = Arbiter(budget_mb=cfg.vram_budget_mb, consumers={"ollama": consumer})
             executor = Executor(
@@ -96,7 +117,7 @@ def run(
 
     try:
         asyncio.run(_run())
-    except OneCardError as exc:
+    except (OneCardError, NotImplementedError) as exc:
         _fail(exc)
 
 
