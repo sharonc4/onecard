@@ -488,3 +488,25 @@ Nothing degrades quietly. Three explicit commitments:
 - **Profile model selections are unvalidated.** Initial profiles are seeded from
   general reputation, not measurement. Before v1.0 each profile's claims should
   be checked on real 8GB hardware, and the dated headers filled in honestly.
+- **Partial spill is not detected.** `/api/ps` reports both `size` and
+  `size_vram`; when a model is partly in system RAM, `size_vram` is the smaller
+  of the two, and when it is entirely in RAM `size_vram` is zero. The harness
+  currently reads `size_vram` and does not compare it against `size`, so the one
+  signal that would reveal a spill already in progress is discarded. The reason
+  it is not simply an error: on the shipped CPU-only compose override every
+  model legitimately reports `size_vram: 0`, so detection has to distinguish
+  "no GPU expected" from "GPU expected but unused". That is a design question,
+  and it is the most important open item in this document — spill detection is
+  the project's whole subject.
+- **`onecard validate` never contacts Ollama.** The Configuration section above
+  claims validation checks that every model exists in Ollama. It does not: it
+  checks the config's internal consistency and its VRAM arithmetic only, and
+  never opens a connection. A misspelled model ref is therefore caught at first
+  run, not at validate time. Either implement the check behind a flag or amend
+  the claim.
+- **Validation under-reserves for an unmeasured pinned model.** A model declared
+  `residency: pinned` with no `footprint_mb` contributes nothing to the pinned
+  total, so `validate` can pass a config that overcommits at run time. Since the
+  arbiter now reconciles against `/api/ps` before every claim, the consequence is
+  a clear `BudgetError` rather than a silent spill — but validate should still
+  catch it.
