@@ -20,6 +20,16 @@ Model switching is therefore not a feature. It is the only mechanism by which a
 low-VRAM user can have specialists at all, and its cost — load latency — is the
 central engineering problem of the project.
 
+The same argument extends past language models. An image generator wants the
+whole card too, and if a 5GB LLM is already resident when ComfyUI loads a
+checkpoint, the checkpoint spills to system RAM and generation slows by two
+orders of magnitude — **silently**, with no error, looking exactly like a hang.
+So onecard is not a model router with an image plugin. It is a **GPU arbiter**:
+one component owns the card and decides who holds it, whether the claimant is an
+Ollama model or a ComfyUI workflow.
+
+That is the part no other tool does, because on 24GB the question never comes up.
+
 ## Scope
 
 **Target user:** a developer or enthusiast with a single consumer GPU, 8GB VRAM,
@@ -28,28 +38,43 @@ running Linux or Windows with Docker and an NVIDIA card.
 **In v1:**
 
 - YAML-declared tasks mapping to specific models
-- VRAM budget accounting and swap policy
+- GPU arbitration: VRAM budget accounting and swap policy across *all* GPU consumers
+- Image generation via ComfyUI, arbitrated against the LLM backend
+- Voice in and out (Whisper, Piper), CPU-only by design
 - Memory (durable facts + retrieved conversation history)
 - Tool actions with per-task permission allowlists
 - Plugin interface, with two reference connectors (Obsidian, HTTP/webhook)
-- CLI, HTTP API, OpenAI-compatible endpoint
+- CLI, HTTP API, OpenAI-compatible endpoint, streaming responses
+- First-run wizard: detect the card, pick a profile, pull the models
+- Disk budget accounting for downloaded models
 - Docker Compose packaging with a CPU-only override
 
 **Explicitly out of v1:**
 
 - A web chat UI (Open WebUI already exists and can point at the compatible endpoint)
-- Backends other than Ollama (the backend is behind an interface, but only one implementation ships)
+- LLM backends other than Ollama (the backend is behind an interface, but only one implementation ships)
+- Document RAG over a user-chosen folder (overlaps the memory layer; deferred to v2)
+- Model auto-download on demand — pulling 5GB mid-request is a hostile surprise
+- Autonomous multi-step agent loops — small models plan badly enough that this
+  would only ever be a demo
+- Speculative decoding — requires draft and target models resident together,
+  the one thing 8GB cannot do
 - Multi-user support, auth, or anything network-facing beyond localhost
 - Fine-tuning, training, or model conversion
 
 ## Architecture
 
-Two containers.
+Three containers. Two of them want the GPU; exactly one may hold it at a time,
+and `onecard` decides which.
 
 | Service | Responsibility | GPU |
 |---|---|---|
-| `ollama` | Holds models, performs inference | Yes (device reservation) |
-| `onecard` | Router, VRAM policy, memory, tools, API, CLI | No |
+| `ollama` | Holds language models, performs inference | Yes (arbitrated) |
+| `comfyui` | Image generation workflows | Yes (arbitrated) |
+| `onecard` | Arbiter, router, memory, tools, voice, API, CLI | No |
+
+`comfyui` is optional: a `docker-compose.noimage.yml` override omits it, and a
+config with no image tasks never starts it.
 
 The `onecard` container never imports torch or CUDA. It talks to Ollama over
 HTTP. This keeps the image small, keeps GPU concerns entirely in Ollama's
@@ -63,17 +88,23 @@ Internal module boundaries, each independently testable:
 onecard/
   config/     # schema, parsing, validation
   router/     # task -> model resolution, pipeline scheduling
-  vram/       # budget accounting, residency policy, eviction
-  backend/    # Ollama client behind a Backend interface
+  gpu/        # arbiter: budget accounting, residency policy, eviction, claims
+  backend/    # GpuConsumer implementations: Ollama, ComfyUI
+  voice/      # Whisper STT + Piper TTS, CPU-only
   memory/     # SQLite facts + embedded history, retrieval
   tools/      # tool registry, call loop, argument validation
   permissions/# allowlist matcher
   plugins/    # entry-point discovery and contract
-  api/        # FastAPI app, OpenAI-compatible shim
-  cli/        # command-line entrypoint
+  api/        # FastAPI app, OpenAI-compatible shim, streaming
+  cli/        # command-line entrypoint, first-run wizard
+  disk/       # model disk accounting
 ```
 
-## VRAM budget and swap policy
+## GPU arbitration: budget and swap policy
+
+Every consumer of the card implements one `GpuConsumer` interface: report what
+you hold, load this, release everything. Ollama and ComfyUI are the two v1
+implementations. The arbiter reasons about claims, not about model families.
 
 **The budget is declared, never inferred.** `vram_budget_mb` is set by the user.
 An 8GB card realistically offers ~6500–7000MB after the display driver. The
@@ -117,6 +148,31 @@ felt slow.
 model plus KV cannot fit even alone, `onecard validate` fails. This is caught at
 validate time, not at request time.
 
+### Exclusive claims
+
+Some consumers cannot share. A ComfyUI workflow declares `exclusive: true`,
+meaning the arbiter must evict **every** other resident model — pinned ones
+included — before the claim is granted, and restore them afterward.
+
+The sequence for an image task:
+
+1. Snapshot current residency (including pinned models, so they can be restored).
+2. Evict everything via `keep_alive: 0`, and confirm against `/api/ps` that the
+   card is actually clear. **Confirm, not assume** — proceeding on an
+   unconfirmed eviction is what produces the silent spill this design exists to
+   prevent.
+3. Grant the claim; ComfyUI loads its checkpoint and runs.
+4. Release, then restore the pinned set.
+
+This is genuinely slow — two swaps plus a checkpoint load. The CLI and API must
+**report the arbitration steps as they happen**, so an image request reads as
+"evicting reasoner → loading checkpoint → generating" rather than a thirty-second
+silence the user interprets as a crash.
+
+Exclusive claims are serialized behind a single lock. A second image request
+waits rather than racing; concurrent exclusive claims are the failure mode that
+produces two half-loaded checkpoints and a thrashing card.
+
 ## Configuration
 
 One file, `onecard.yaml`. It is the entire user-facing surface — preferences,
@@ -124,6 +180,15 @@ routing, and permissions — and is intended to be shared and forked.
 
 ```yaml
 vram_budget_mb: 6800
+disk_budget_gb: 60          # refuse pulls that would exceed this
+
+voice:                       # CPU-only; excluded from the VRAM budget
+  stt: { engine: whisper, model: base }
+  tts: { engine: piper,   voice: en_US-amy-medium }
+
+image:
+  backend: comfyui
+  url: http://comfyui:8188
 
 models:
   fast:      { ref: "qwen2.5:1.5b-instruct-q4_K_M", residency: pinned }
@@ -151,6 +216,13 @@ tasks:
     model: fast
     prompt: prompts/summarize.md
     permissions: []
+
+  # An image task claims the GPU exclusively: everything else is evicted first.
+  picture:
+    workflow: workflows/sd15_txt2img.json
+    exclusive: true
+    params: { steps: 25, width: 512, height: 512 }
+    permissions: [ "fs.write:./data/images/**" ]
 
   # A task may instead declare ordered steps. Each step names a model; the
   # scheduler groups consecutive steps sharing a model into one load.
@@ -195,6 +267,64 @@ also gives contributors an obvious low-friction way to participate.
 
 No "best model per task" table is baked into the router's code, where it could
 not be corrected without a release.
+
+## Image generation
+
+Image tasks name a **ComfyUI workflow JSON**, not a model. onecard submits the
+workflow via ComfyUI's HTTP API with parameter overrides, polls for completion,
+and writes the result to a permitted path. It does not build workflows, expose a
+node graph, or attempt to be a ComfyUI frontend — ComfyUI already is one.
+
+**Be honest about speed.** At 8GB an image request costs an eviction, a
+checkpoint load, generation, and a restore. SD1.5-class checkpoints (~2–4GB) are
+the realistic default; SDXL is tight; Flux is impractical without aggressive
+quantization and patience. The shipped profile uses SD1.5 and the docs say why
+rather than letting users discover it as a disappointment.
+
+**Failure is loud.** If ComfyUI is unreachable, the workflow JSON is invalid, or
+a node is missing, the task errors with the cause. There is no fallback to a
+different workflow, and a generation that silently produced nothing is an error,
+not an empty result — the same rule as everywhere else in this design.
+
+## Voice
+
+Two independent capabilities, both **CPU-only and excluded from the VRAM
+budget**:
+
+- **Speech in** — Whisper (`base`/`small`), transcribing to text before routing.
+- **Speech out** — Piper, synthesizing a task's text response.
+
+The exclusion is deliberate. These models are small enough to run acceptably on
+CPU, and the moment voice competes for the card it reintroduces the arbitration
+cost for the sake of a few hundred milliseconds. Voice must never cause a swap.
+
+Voice is a transport, not a task type: `onecard chat --voice` transcribes input,
+routes it through the normal task machinery, and speaks the result. Any task can
+be driven by voice; no task is voice-specific.
+
+## First-run wizard
+
+`onecard init` detects the installed GPU and its VRAM, recommends a matching
+profile, shows the total disk cost of that profile's models, and — on
+confirmation — pulls them and writes an `onecard.yaml`.
+
+This exists because the target user wants an assistant, not a VRAM budgeting
+exercise. Everything the wizard does is also doable by hand; the wizard writes a
+plain config file the user can then read and edit. It is a starting point, not a
+layer of magic that owns the configuration.
+
+If no supported GPU is detected, the wizard says so plainly and offers the
+CPU-only profile rather than writing a config that cannot work.
+
+## Disk budget
+
+Models are large and multiply quietly: five specialists at ~5GB each is 25GB,
+before checkpoints and voice models. `disk_budget_gb` caps the total.
+
+`onecard pull` reports what it is about to download and the resulting total
+before starting, and refuses to exceed the budget. `onecard ps --disk` shows
+current usage per model. Nothing is ever downloaded as a side effect of a
+request — pulls are always explicit.
 
 ## Memory
 
@@ -241,11 +371,18 @@ The router is a library; every surface is a thin adapter over it.
 
 **CLI** (primary, and what the README demos):
 
-- `onecard run <task> "<input>"`
-- `onecard chat`
+- `onecard init` — first-run wizard: detect card, pick profile, pull models
+- `onecard run <task> "<input>"` — streams tokens by default
+- `onecard chat [--voice]`
 - `onecard validate`
-- `onecard ps` — what is resident, measured footprint, remaining budget
-- `onecard pull --profile 8gb-developer` — fetch every model a profile needs
+- `onecard ps [--disk]` — what is resident, measured footprint, remaining budget
+- `onecard pull --profile 8gb-developer` — fetch every model a profile needs,
+  reporting disk cost first
+
+Arbitration progress is printed to stderr as it happens (`evicting reasoner…`,
+`loading checkpoint…`), so slow operations never look like a hang. Token
+streaming is on by default in both CLI and API; `/v1/chat/completions` honours
+the standard `stream` parameter.
 
 **HTTP API** (FastAPI):
 
@@ -268,6 +405,13 @@ services:
       resources:
         reservations:
           devices: [ { driver: nvidia, count: 1, capabilities: [gpu] } ]
+  comfyui:
+    image: comfyui
+    volumes: [ ./data/comfyui:/data ]
+    deploy:
+      resources:
+        reservations:
+          devices: [ { driver: nvidia, count: 1, capabilities: [gpu] } ]
   onecard:
     build: .
     depends_on: [ ollama ]
@@ -277,7 +421,13 @@ services:
     ports: [ "8080:8080" ]
 ```
 
-A `docker-compose.cpu.yml` override drops the device reservation so contributors
+Both GPU services reserve the same device. That is intentional and safe *only*
+because onecard guarantees they are never resident simultaneously — the
+arbitration lock, not Docker, is what enforces exclusivity. This is the single
+most important invariant in the system, and it is enforced in one place.
+
+A `docker-compose.noimage.yml` override omits `comfyui` entirely for users who
+do not want image generation. A `docker-compose.cpu.yml` override drops the device reservation so contributors
 without an NVIDIA card can run tests and submit PRs. A project targeting people
 with modest hardware must not require good hardware to contribute to.
 
@@ -307,6 +457,12 @@ Nothing degrades quietly. Three explicit commitments:
   model, exercising the actual load and evict path.
 - **Swap policy specifically** — a three-step pipeline must produce exactly one
   swap; eviction must select LRU; overcommitted configs must fail validation.
+- **Arbitration specifically** — an exclusive claim must evict pinned models and
+  restore them afterward; a claim must not be granted until eviction is
+  *confirmed*, not merely requested; two concurrent exclusive claims must
+  serialize rather than overlap. The fake backend simulates a consumer that
+  reports itself still resident after an evict request, so the confirm-don't-
+  assume path is actually exercised.
 
 ## Repository
 
@@ -321,6 +477,14 @@ Nothing degrades quietly. Three explicit commitments:
 - **No 8GB hardware has run this yet.** The design is reasoned from published
   model sizes and Ollama's documented behavior, not from measurement. Every
   VRAM figure here is an estimate until someone runs it on a real card.
+- **Eviction confirmation needs a real-hardware answer.** `/api/ps` reports what
+  Ollama believes it holds, which is not the same as VRAM actually being free —
+  drivers release memory asynchronously. Whether the arbiter must additionally
+  poll free VRAM, and how long it should wait before declaring an eviction
+  failed, can only be settled by measurement on a real card.
+- **ComfyUI container image is unpinned.** The compose sketch names `comfyui`
+  generically; v1 must pin a specific published image and version, or ship a
+  Dockerfile.
 - **Profile model selections are unvalidated.** Initial profiles are seeded from
   general reputation, not measurement. Before v1.0 each profile's claims should
   be checked on real 8GB hardware, and the dated headers filled in honestly.
