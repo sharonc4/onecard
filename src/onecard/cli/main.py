@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -6,6 +7,7 @@ import typer
 
 from onecard.backend.ollama import OllamaConsumer
 from onecard.config.loader import load_config
+from onecard.config.schema import Config, MemorySpec, TaskSpec
 from onecard.config.validate import validate_config
 from onecard.errors import BackendError, OneCardError
 from onecard.gpu.arbiter import Arbiter
@@ -48,21 +50,75 @@ def _make_client(ollama: str) -> httpx.AsyncClient:
         raise BackendError(f"invalid --ollama URL '{ollama}': {exc}") from exc
 
 
+def _deferred_warnings(cfg: Config) -> list[str]:
+    """Warn about keys this build parses and then ignores.
+
+    These are validly configured -- it is this build that lacks the features --
+    so they belong here rather than in `validate_config`. Saying "ok" to a
+    config whose permission allowlist does nothing would be a lie in a project
+    whose pitch is that a task provably cannot read the filesystem.
+    """
+    warnings: list[str] = []
+    default_memory = MemorySpec()
+
+    def named(predicate: Callable[[TaskSpec], bool]) -> str:
+        return ", ".join(sorted(n for n, t in cfg.tasks.items() if predicate(t)))
+
+    workflow_tasks = named(lambda t: t.workflow is not None)
+    if workflow_tasks:
+        warnings.append(
+            f"task(s) {workflow_tasks} declare 'workflow' and cannot run in this "
+            "build (no ComfyUI consumer)"
+        )
+    permission_tasks = named(lambda t: bool(t.permissions))
+    if permission_tasks or cfg.defaults.permissions:
+        where = permission_tasks or "defaults"
+        warnings.append(
+            f"'permissions' is declared ({where}) but is not enforced by this build: "
+            "no sandbox is applied and every task has the same access this process has"
+        )
+    tool_tasks = named(lambda t: bool(t.tools))
+    if tool_tasks:
+        warnings.append(
+            f"'tools' is declared (task(s) {tool_tasks}) but this build has no tool "
+            "runtime; the allowlist has no effect"
+        )
+    memory_tasks = named(lambda t: t.memory != default_memory)
+    if memory_tasks or cfg.defaults.memory != default_memory:
+        where = f"task(s) {memory_tasks}" if memory_tasks else "defaults"
+        warnings.append(
+            f"'memory' is declared ({where}) but this build has no memory store; "
+            "nothing is read or written"
+        )
+    exclusive_tasks = named(lambda t: t.exclusive and t.workflow is None)
+    if exclusive_tasks:
+        warnings.append(
+            f"'exclusive: true' on model task(s) {exclusive_tasks} is ignored by this "
+            "build; only workflow tasks take the card exclusively"
+        )
+    if cfg.disk_budget_gb is not None:
+        warnings.append(
+            f"'disk_budget_gb: {cfg.disk_budget_gb}' is recorded but not enforced: "
+            "this build never pulls or prunes models"
+        )
+    if cfg.defaults.model is not None:
+        warnings.append(
+            f"'defaults.model: {cfg.defaults.model}' is ignored; every task must name "
+            "its own model in this build"
+        )
+    return warnings
+
+
 @app.command()
 def validate(config: Path = ConfigOpt) -> None:
     """Check the config before anything tries to use it."""
     try:
         cfg = load_config(config)
-        warnings = validate_config(cfg)
+        warnings = validate_config(cfg, config.parent)
     except OneCardError as exc:
         _fail(exc)
         return
-    workflow_tasks = sorted(name for name, task in cfg.tasks.items() if task.workflow is not None)
-    if workflow_tasks:
-        warnings.append(
-            f"task(s) {', '.join(workflow_tasks)} declare 'workflow' and cannot run in this "
-            "build (no ComfyUI consumer)"
-        )
+    warnings.extend(_deferred_warnings(cfg))
 
     for w in warnings:
         typer.echo(f"warning: {w}")
@@ -104,8 +160,8 @@ def run(
 
     async def _run() -> None:
         cfg = load_config(config)
-        validate_config(cfg)
-        plan = build_plan(cfg, task)
+        validate_config(cfg, config.parent)
+        plan = build_plan(cfg, task, config.parent)
         if explain:
             typer.echo(f"task={plan.task} models={plan.load_sequence}", err=True)
         async with _make_client(ollama) as client:

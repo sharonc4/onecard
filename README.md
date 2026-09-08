@@ -25,16 +25,22 @@ task for exactly this kind of prompt:
 onecard run code "why is this function slow?" --config profiles/8gb-developer.yaml
 ```
 
-It is a **GPU arbiter**, not just a model router: one component owns the card
-and decides who holds it, so nothing ever quietly spills to system RAM.
+It is a **GPU arbiter**, not just a model router: one component owns the card,
+enforces the VRAM budget you declare, and confirms against the backend that an
+eviction actually happened before loading anything on top of it.
 
 ## Quickstart
 
 ```bash
 docker compose up -d
+docker compose exec ollama ollama pull qwen2.5:1.5b-instruct-q4_K_M
 docker compose run --rm onecard validate
 docker compose run --rm onecard run summarize "some long text"
 ```
+
+The `pull` is the model `onecard.yaml`'s `summarize` task uses; without it the
+run fails with a model-not-found error from Ollama. `onecard run code` from the
+developer profile additionally needs `ollama pull qwen2.5-coder:7b-instruct-q4_K_M`.
 
 No NVIDIA card? Everything still runs, slowly, on CPU:
 

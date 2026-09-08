@@ -105,3 +105,56 @@ def test_ps_with_a_malformed_ollama_url_fails_clearly(tmp_path: Path):
     assert result.exit_code == 1
     assert "http://[::1" in result.stdout
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+DEFERRED = textwrap.dedent(
+    """
+    vram_budget_mb: 8000
+    disk_budget_gb: 60
+    models:
+      coder: { ref: "qwen2.5-coder:7b", footprint_mb: 4500 }
+    tasks:
+      code:
+        model: coder
+        exclusive: true
+        permissions: ["read:./src"]
+        tools: ["shell"]
+        memory: { read: true, write: true }
+    defaults:
+      model: coder
+    """
+)
+
+MISSING_PROMPT = textwrap.dedent(
+    """
+    vram_budget_mb: 8000
+    models:
+      coder: { ref: "qwen2.5-coder:7b", footprint_mb: 4500 }
+    tasks:
+      code: { model: coder, prompt: prompts/nope.md }
+    """
+)
+
+
+def test_validate_warns_about_every_deferred_key_but_still_says_ok(tmp_path: Path):
+    result = runner.invoke(app, ["validate", "--config", str(write(tmp_path, DEFERRED))])
+    assert result.exit_code == 0
+    out = result.stdout.lower()
+    for key in ("permissions", "tools", "memory", "disk_budget_gb", "defaults.model", "exclusive"):
+        assert key.lower() in out, f"no warning mentioned {key}"
+    assert "code" in out, "the affected task must be named"
+    assert "ok" in out
+
+
+def test_validate_rejects_a_prompt_file_that_does_not_exist(tmp_path: Path):
+    result = runner.invoke(app, ["validate", "--config", str(write(tmp_path, MISSING_PROMPT))])
+    assert result.exit_code == 1
+    assert "nope.md" in result.stdout
+
+
+def test_validate_accepts_a_prompt_file_relative_to_the_config_directory(tmp_path: Path):
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "nope.md").write_text("Review this.", encoding="utf-8")
+    result = runner.invoke(app, ["validate", "--config", str(write(tmp_path, MISSING_PROMPT))])
+    assert result.exit_code == 0
+    assert "ok" in result.stdout.lower()
