@@ -1,3 +1,5 @@
+from typing import Any
+
 from onecard.config.schema import Config, TaskSpec
 from onecard.errors import ConfigError
 from onecard.gpu.estimate import estimate_kv_mb
@@ -7,6 +9,21 @@ DEFAULT_NUM_CTX = 2048
 
 def _declared_sources(task: TaskSpec) -> int:
     return sum(x is not None for x in (task.model, task.steps, task.workflow))
+
+
+def _fit_check_pairs(task: TaskSpec) -> list[tuple[str, dict[str, Any]]]:
+    """Every (model, effective-params) pair a task can execute.
+
+    A task with `model` yields one pair with the task's own params. A task with
+    `steps` yields one pair per step, with step params overriding task params —
+    this must match the merge `build_plan` performs. A `workflow` task involves
+    no language model and yields nothing.
+    """
+    if task.model is not None:
+        return [(task.model, task.params)]
+    if task.steps is not None:
+        return [(step.model, {**task.params, **step.params}) for step in task.steps]
+    return []
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -38,17 +55,17 @@ def validate_config(cfg: Config) -> list[str]:
         )
 
     for name, task in cfg.tasks.items():
-        if task.model is None:
-            continue
-        spec = cfg.models[task.model]
-        if spec.footprint_mb is None or spec.residency == "pinned":
-            continue
-        num_ctx = int(task.params.get("num_ctx", DEFAULT_NUM_CTX))
-        need = spec.footprint_mb + estimate_kv_mb(num_ctx, cfg.kv_mb_per_1k_ctx)
-        if need + pinned_mb > cfg.vram_budget_mb:
-            raise ConfigError(
-                f"task '{name}' can never fit: needs {need}MB plus {pinned_mb}MB pinned, "
-                f"budget is {cfg.vram_budget_mb}MB"
-            )
+        for model_ref, effective_params in _fit_check_pairs(task):
+            spec = cfg.models[model_ref]
+            if spec.footprint_mb is None or spec.residency == "pinned":
+                continue
+            num_ctx = int(effective_params.get("num_ctx", DEFAULT_NUM_CTX))
+            need = spec.footprint_mb + estimate_kv_mb(num_ctx, cfg.kv_mb_per_1k_ctx)
+            if need + pinned_mb > cfg.vram_budget_mb:
+                where = name if task.model is not None else f"{name}' step model '{model_ref}"
+                raise ConfigError(
+                    f"task '{where}' can never fit: needs {need}MB plus {pinned_mb}MB pinned, "
+                    f"budget is {cfg.vram_budget_mb}MB"
+                )
 
     return warnings

@@ -76,3 +76,36 @@ def test_unmeasured_model_produces_a_warning_not_an_error():
     )
     warnings = validate_config(c)
     assert any("footprint" in w for w in warnings)
+
+
+def test_step_model_that_can_never_fit_fails():
+    bad = cfg(
+        vram_budget_mb=2000,
+        models={
+            "fast": ModelSpec(ref="qwen2.5:1.5b", footprint_mb=900),
+            "big": ModelSpec(ref="llama3.1:8b", footprint_mb=5000),
+        },
+        tasks={
+            "pipeline": TaskSpec(
+                steps=[StepSpec(model="fast"), StepSpec(model="big")]
+            )
+        },
+    )
+    with pytest.raises(ConfigError, match="can never fit"):
+        validate_config(bad)
+
+
+def test_step_pipeline_that_fits_passes():
+    ok = cfg(
+        vram_budget_mb=6800,
+        models={
+            "fast": ModelSpec(ref="qwen2.5:1.5b", residency="pinned", footprint_mb=900),
+            "big": ModelSpec(ref="llama3.1:8b", footprint_mb=5000),
+        },
+        tasks={
+            "pipeline": TaskSpec(
+                steps=[StepSpec(model="fast"), StepSpec(model="big")]
+            )
+        },
+    )
+    assert validate_config(ok) == []
