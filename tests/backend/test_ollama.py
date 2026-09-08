@@ -111,3 +111,21 @@ async def test_chat_streams_content_chunks():
 
     chunks = [c async for c in consumer(handler).chat("m", "hi", {})]
     assert "".join(chunks) == "Hello"
+
+
+async def test_residents_raises_backend_error_on_non_json_body():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/ps"
+        return httpx.Response(200, text="<html><body>502 Bad Gateway</body></html>")
+
+    with pytest.raises(BackendError, match="not valid JSON|non-JSON"):
+        await consumer(handler).residents()
+
+
+async def test_chat_raises_backend_error_on_malformed_stream_line():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = '{"message":{"content":"Hel"},"done":false}\n' "not json at all\n"
+        return httpx.Response(200, text=body)
+
+    with pytest.raises(BackendError, match="not valid JSON|non-JSON"):
+        _ = [c async for c in consumer(handler).chat("m", "hi", {})]

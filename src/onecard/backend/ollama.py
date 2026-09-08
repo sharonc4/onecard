@@ -40,13 +40,20 @@ class OllamaConsumer:
             raise BackendError(f"ollama unreachable at {self.base_url}: {exc}") from exc
         if resp.status_code >= 400:
             raise BackendError(f"ollama returned {resp.status_code}: {resp.text[:200]}")
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise BackendError(
+                f"ollama at {self.base_url} returned a non-JSON response from /api/ps: "
+                f"{resp.text[:200]!r}"
+            ) from exc
         return [
             Residency(
                 consumer=self.name,
                 key=entry["name"],
                 footprint_mb=int(entry.get("size_vram", 0)) // BYTES_PER_MIB,
             )
-            for entry in resp.json().get("models", [])
+            for entry in data.get("models", [])
         ]
 
     async def load(self, key: str, *, pinned: bool, footprint_hint_mb: int | None) -> Residency:
@@ -86,7 +93,14 @@ class OllamaConsumer:
                 async for line in resp.aiter_lines():
                     if not line.strip():
                         continue
-                    content = json.loads(line).get("message", {}).get("content", "")
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise BackendError(
+                            f"ollama at {self.base_url} streamed a non-JSON line from "
+                            f"/api/chat: {line[:200]!r}"
+                        ) from exc
+                    content = chunk.get("message", {}).get("content", "")
                     if content:
                         yield content
         except httpx.HTTPError as exc:
