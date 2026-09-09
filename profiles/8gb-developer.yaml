@@ -1,0 +1,29 @@
+# Profile: 8gb-developer
+# Reviewed: 2026-09-09
+# Evidence, split by how much we actually know:
+#   vram_budget_mb — MEASURED on an RTX 2070 SUPER (8192 MiB). Idle usage was
+#     1630 MiB with both monitors on the card, 894 with one moved to the iGPU,
+#     662 headless. 6500 fits the worst case; raise to ~7300 if your monitors
+#     run off the motherboard.
+#   footprint_mb  — ESTIMATED from published Q4_K_M quantization sizes. These
+#     have NOT been measured under Ollama. onecard measures each model on its
+#     first load and stores the real number, so these are only starting points.
+#     If you run this on a real card, a PR correcting them is the single most
+#     useful contribution you can make.
+vram_budget_mb: 6500
+disk_budget_gb: 60
+
+models:
+  fast:  { ref: "qwen2.5:1.5b-instruct-q4_K_M", residency: pinned, footprint_mb: 1100 }
+  coder: { ref: "qwen2.5-coder:7b-instruct-q4_K_M", footprint_mb: 4700 }
+
+tasks:
+  code:
+    model: coder
+    params: { num_ctx: 8192, temperature: 0.2 }
+  explain:
+    model: coder
+    params: { num_ctx: 8192 }
+  summarize:
+    model: fast
+    params: { num_ctx: 4096 }

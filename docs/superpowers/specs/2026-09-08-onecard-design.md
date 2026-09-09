@@ -474,17 +474,70 @@ Nothing degrades quietly. Three explicit commitments:
 
 ## Open items
 
-- **No 8GB hardware has run this yet.** The design is reasoned from published
-  model sizes and Ollama's documented behavior, not from measurement. Every
-  VRAM figure here is an estimate until someone runs it on a real card.
-- **Eviction confirmation needs a real-hardware answer.** `/api/ps` reports what
-  Ollama believes it holds, which is not the same as VRAM actually being free —
-  drivers release memory asynchronously. Whether the arbiter must additionally
-  poll free VRAM, and how long it should wait before declaring an eviction
-  failed, can only be settled by measurement on a real card.
+- **onecard itself has not run on 8GB hardware, but the card has been measured.**
+  The budget and headroom figures below come from an RTX 2070 SUPER (8GB) that
+  ran Flux, ComfyUI, Ollama and a VLM detector for months. What remains
+  unmeasured is onecard's own swap timing and per-model Ollama footprints.
+
+  | Measurement | Value |
+  |---|---|
+  | Card total | 8192 MiB |
+  | Idle, both displays driven by the card | 1630 MiB used → 6562 free |
+  | Idle, one display moved to the motherboard | 894 MiB used → 7298 free |
+  | Idle, headless (both on the motherboard) | 662 MiB used → 7530 free |
+  | Largest Flux UNet that fits headless | Q4_K_S, 6.33 GB |
+  | Next quantization up | Q5_K_S, 7.71 GB — does **not** fit |
+  | Render peak, headless | 6844 MiB (84%) |
+  | Render peak, display attached | 7682 MiB (94%) |
+
+  Two conclusions the design now rests on. First, **the display tax is real and
+  large**: moving both monitors to the integrated GPU bought 968 MiB, which is
+  the difference between a model fitting and not. Second, **weights fitting is
+  what matters, not raw speed** — losing a second GPU cost no time at all
+  (219.7s → 227.4s per frame) because nothing had to stream over PCIe.
+
+- **Spilling is silent and enormous, and that is now quantified.** On the same
+  card, a workload peaking at 10.08 GB did not fail — it completed in 103s
+  where a 5.28 GB peak took 2.3s. A 45x slowdown, no error, no warning. Ollama
+  holding 6 GB during a Flux render degraded it to ~916 s/step. This is the
+  entire justification for the project: on a small card, *slow means over-VRAM,
+  not compute-bound*, and nothing in the stack tells you.
+- ~~**Eviction confirmation needs a real-hardware answer.**~~ **ANSWERED —
+  yes, and more strongly than expected.** Measured on an RTX 2070 SUPER (8GB):
+  Ollama's container held ~6GB while a model was loaded, and a `keep_alive: 0`
+  release **did not give that memory back** — only stopping the container did.
+  Because it ran in Docker it was also invisible to
+  `nvidia-smi --query-compute-apps`, which showed only
+  `pid 524 [Insufficient Permissions]`. So a backend can truthfully answer "no
+  models resident" while still holding gigabytes, and per-process attribution
+  cannot be trusted either. Asking the consumer is necessary but not
+  sufficient. The arbiter now also reads total free VRAM from the driver and
+  refuses any claim larger than it (`gpu/probe.py`).
 - **ComfyUI container image is unpinned.** The compose sketch names `comfyui`
   generically; v1 must pin a specific published image and version, or ship a
   Dockerfile.
 - **Profile model selections are unvalidated.** Initial profiles are seeded from
   general reputation, not measurement. Before v1.0 each profile's claims should
   be checked on real 8GB hardware, and the dated headers filled in honestly.
+- **Entering a spill is now prevented; detecting one already in progress is
+  not.** The arbiter reads free VRAM from the driver before granting a claim
+  and refuses anything larger, which covers the measured failure — memory held
+  by a process onecard does not manage. What is still missing is the *other*
+  direction: `/api/ps` reports both `size` and `size_vram`, and comparing them
+  would reveal a model that is already partly in system RAM. onecard does not
+  compare them, because on the CPU-only compose override every model
+  legitimately reports `size_vram: 0`, so detection has to distinguish "no GPU
+  expected" from "GPU expected but unused". Worth doing; no longer the most
+  urgent gap.
+- **`onecard validate` never contacts Ollama.** The Configuration section above
+  claims validation checks that every model exists in Ollama. It does not: it
+  checks the config's internal consistency and its VRAM arithmetic only, and
+  never opens a connection. A misspelled model ref is therefore caught at first
+  run, not at validate time. Either implement the check behind a flag or amend
+  the claim.
+- **Validation under-reserves for an unmeasured pinned model.** A model declared
+  `residency: pinned` with no `footprint_mb` contributes nothing to the pinned
+  total, so `validate` can pass a config that overcommits at run time. Since the
+  arbiter now reconciles against `/api/ps` before every claim, the consequence is
+  a clear `BudgetError` rather than a silent spill — but validate should still
+  catch it.
