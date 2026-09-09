@@ -17,7 +17,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    # mypy --strict cannot check `import yaml` without these stubs. Left
+    # undeclared, it passes only on machines that happen to have them
+    # installed from some other project — and fails on every clean one.
+    "types-PyYAML>=6",
+]
 
 [project.scripts]
 onecard = "onecard.cli.main:app"
