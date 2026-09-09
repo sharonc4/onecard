@@ -54,9 +54,22 @@ Early. The core router, arbiter, and CLI work. Image generation, voice, memory,
 and tools are designed but not yet built — see
 [the design doc](docs/superpowers/specs/2026-09-08-onecard-design.md).
 
-**No VRAM figure in this repo has been measured on real 8GB hardware yet.** If
-you have such a card, correcting the numbers in `profiles/` is the single most
-useful contribution you can make.
+**What is measured and what is not.** The VRAM budgets come from a real
+RTX 2070 SUPER (8192 MiB): 1630 MiB sits idle when the card drives both
+monitors, 894 MiB with one moved to the motherboard, 662 MiB headless. Moving
+your displays off the GPU buys nearly a gigabyte, which is routinely the
+difference between a model fitting and silently spilling. The per-model
+`footprint_mb` numbers in `profiles/` are still estimates from published
+quantization sizes — onecard measures each model on first load and remembers
+the real value, so correcting those in a PR is the single most useful
+contribution you can make.
+
+**Why "silently" is the right word.** On that same card a workload peaking at
+10.08 GB did not fail — it finished in 103s where a 5.28 GB peak took 2.3s. And
+with Ollama holding 6 GB, a Flux render degraded to ~916 s/step. No error, no
+warning, just a machine that looks broken. onecard reads free VRAM from the
+driver before every claim and refuses one that would not fit, because a backend
+can report "nothing loaded" while its process still holds gigabytes.
 
 ## Development
 

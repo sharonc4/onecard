@@ -1,4 +1,15 @@
-vram_budget_mb: 6800
+# Measured on an RTX 2070 SUPER (8192 MiB), which is what an "8GB card" really
+# gives you once the desktop has its share:
+#
+#   both monitors driven by the card   1630 MiB idle  ->  6562 free
+#   one monitor moved to the iGPU       894 MiB idle  ->  7298 free
+#   headless (both on the iGPU)         662 MiB idle  ->  7530 free
+#
+# 6500 is the safe default because it still fits the worst of those. If your
+# monitors run off the motherboard you can raise this to about 7300 — that one
+# change buys nearly a gigabyte, which is often the difference between a model
+# fitting and silently spilling to system RAM.
+vram_budget_mb: 6500
 disk_budget_gb: 60
 
 models:

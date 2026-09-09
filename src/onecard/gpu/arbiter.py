@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from onecard.errors import BudgetError, EvictionError
 from onecard.gpu.consumer import GpuConsumer, Residency
+from onecard.gpu.probe import VramProbe
 
 
 @dataclass
@@ -26,9 +27,18 @@ class Arbiter:
     claims, never about model families.
     """
 
-    def __init__(self, budget_mb: int, consumers: dict[str, GpuConsumer]) -> None:
+    def __init__(
+        self,
+        budget_mb: int,
+        consumers: dict[str, GpuConsumer],
+        probe: VramProbe | None = None,
+    ) -> None:
         self.budget_mb = budget_mb
         self.consumers = consumers
+        # Optional, and the arbiter is correct without it — but only within its
+        # own bookkeeping. The probe is what catches memory held by something
+        # onecard does not manage. See gpu/probe.py for the measurements.
+        self.probe = probe
         self.swaps: list[SwapEvent] = []
         self._held: dict[tuple[str, str], _Held] = {}
         self._lock = asyncio.Lock()
@@ -97,11 +107,46 @@ class Arbiter:
                 )
             await self._evict(victim, reason=f"making room for '{key}'")
 
+        self._check_card_has_room(key, need_mb)
+
         residency = await self.consumers[consumer].load(
             key, pinned=pinned, footprint_hint_mb=need_mb
         )
         self._held[ident] = _Held(residency=residency)
         return residency
+
+    def _check_card_has_room(self, key: str, need_mb: int) -> None:
+        """Refuse a claim the card cannot actually hold.
+
+        The budget arithmetic above only knows about models onecard loaded.
+        Measured on an 8GB card: Ollama's container held ~6GB that a
+        `keep_alive: 0` release did not return, and a claim made on top of it
+        did not fail — it spilled to system RAM and ran 45x slower with no
+        error at all. Our own bookkeeping cannot see memory we did not take,
+        so ask the driver.
+
+        No probe means no reading; that is reported as unknown by the caller,
+        never treated as "the card is empty".
+        """
+        if self.probe is None:
+            return
+        reading = self.probe.read()
+        if reading is None:
+            return
+        if need_mb > reading.free_mb:
+            raise BudgetError(
+                f"'{key}' needs {need_mb}MB but the card reports only "
+                f"{reading.free_mb}MB free of {reading.total_mb}MB. onecard "
+                f"accounts for {self._accounted_mb()}MB of the "
+                f"{reading.used_mb}MB in use, so the rest is held by something "
+                "it does not manage — another process, or a backend that "
+                "reported a release without giving the memory back. Loading "
+                "anyway would not fail, it would spill to system RAM and run "
+                "roughly an order of magnitude slower."
+            )
+
+    def _accounted_mb(self) -> int:
+        return sum(h.residency.footprint_mb for h in self._held.values())
 
     def _reusable(self, ident: tuple[str, str], *, pinned: bool) -> _Held | None:
         """The held entry that already satisfies this claim, if there is one.

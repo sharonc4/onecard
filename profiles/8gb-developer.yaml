@@ -1,9 +1,16 @@
 # Profile: 8gb-developer
-# Reviewed: 2026-09-08
-# Evidence: sizes taken from published Q4_K_M quantizations. NOT yet measured on
-#           real 8GB hardware — see the design doc's open items. If you run this
-#           on a real card, please open a PR correcting these numbers.
-vram_budget_mb: 6800
+# Reviewed: 2026-09-09
+# Evidence, split by how much we actually know:
+#   vram_budget_mb — MEASURED on an RTX 2070 SUPER (8192 MiB). Idle usage was
+#     1630 MiB with both monitors on the card, 894 with one moved to the iGPU,
+#     662 headless. 6500 fits the worst case; raise to ~7300 if your monitors
+#     run off the motherboard.
+#   footprint_mb  — ESTIMATED from published Q4_K_M quantization sizes. These
+#     have NOT been measured under Ollama. onecard measures each model on its
+#     first load and stores the real number, so these are only starting points.
+#     If you run this on a real card, a PR correcting them is the single most
+#     useful contribution you can make.
+vram_budget_mb: 6500
 disk_budget_gb: 60
 
 models:

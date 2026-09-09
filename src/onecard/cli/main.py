@@ -11,6 +11,7 @@ from onecard.config.schema import Config, MemorySpec, TaskSpec
 from onecard.config.validate import validate_config
 from onecard.errors import BackendError, OneCardError
 from onecard.gpu.arbiter import Arbiter
+from onecard.gpu.probe import NvidiaSmiProbe
 from onecard.router.execute import Executor
 from onecard.router.plan import build_plan
 from onecard.store.footprints import FootprintStore
@@ -141,6 +142,28 @@ def ps(config: Path = ConfigOpt, ollama: str = OllamaOpt) -> None:
             typer.echo(f"{r.consumer:8} {r.key:40} {r.footprint_mb:6}MB")
         typer.echo(f"{'':8} {'TOTAL':40} {used:6}MB of {cfg.vram_budget_mb}MB")
 
+        # What onecard accounts for is not what the card holds. Anything the
+        # driver reports beyond our total belongs to something else — another
+        # process, a display, or a backend that reported a release without
+        # returning the memory. That gap is what silently causes a spill.
+        reading = NvidiaSmiProbe().read()
+        if reading is None:
+            typer.echo(
+                f"{'':8} {'CARD':40} {'unknown':>6} (no nvidia-smi reading; "
+                "onecard cannot see memory it did not allocate)"
+            )
+            return
+        typer.echo(
+            f"{'':8} {'CARD':40} {reading.used_mb:6}MB used, "
+            f"{reading.free_mb}MB free of {reading.total_mb}MB"
+        )
+        unaccounted = reading.used_mb - used
+        if unaccounted > 0:
+            typer.echo(
+                f"{'':8} {'UNACCOUNTED':40} {unaccounted:6}MB held by something "
+                "onecard does not manage"
+            )
+
     try:
         asyncio.run(_run())
     except OneCardError as exc:
@@ -166,7 +189,11 @@ def run(
             typer.echo(f"task={plan.task} models={plan.load_sequence}", err=True)
         async with _make_client(ollama) as client:
             consumer = OllamaConsumer(base_url=ollama, client=client)
-            arbiter = Arbiter(budget_mb=cfg.vram_budget_mb, consumers={"ollama": consumer})
+            arbiter = Arbiter(
+                budget_mb=cfg.vram_budget_mb,
+                consumers={"ollama": consumer},
+                probe=NvidiaSmiProbe(),
+            )
             executor = Executor(
                 arbiter=arbiter,
                 chat_fn=consumer.chat,
